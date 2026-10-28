@@ -61,6 +61,7 @@ def test_exact_api_frozen_defaults_and_positional_backwards_compatibility():
         "start_date", "days", "minimum_staff", "leader_mode", "max_consecutive_days",
         "minimum_rest_hours", "time_limit_seconds", "shift_times", "shift_names",
         "role_requirements", "nondecreasing_start_times", "avoid_pairs",
+        "same_shift_pairs", "shift_merges", "closed_days", "maximum_staff", "staffing_rules",
     ]
     with pytest.raises(FrozenInstanceError):
         setattr(WeeklyAssignment(0, SHIFT), "weekday", 1)

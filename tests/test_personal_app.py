@@ -1,6 +1,6 @@
 """配慮ペア・個別勤務時刻を実際の生成画面に通す回帰テスト。"""
 
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -9,9 +9,11 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from app_helpers import all_workdays
+
 
 START = date(2026, 1, 1)
-PAIR_COLUMNS = ["職員ID A", "職員ID B", "重み"]
+PAIR_COLUMNS = ["職員ID A", "職員ID B", "優先度"]
 TIME_COLUMNS = ["職員ID", "日付", "シフト", "開始", "終了", "翌日終了", "休憩（分）"]
 RESULT_DOWNLOADS = {
     "シフト表 CSV", "日別配置 CSV", "職員別集計 CSV", "月別労働時間 CSV",
@@ -20,10 +22,9 @@ RESULT_DOWNLOADS = {
 
 
 def small_app(size=3):
-    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=30).run()
+    at = all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=30)).run()
     assert not at.exception
-    at.date_input[0].set_value(START)
-    next(n for n in at.number_input if n.label == "作成日数").set_value(1)
+    at.date_input[0].set_value((START, START + timedelta(days=1 - 1)))
     next(n for n in at.number_input if n.label == "計算時間の上限（秒）").set_value(5)
     at.selectbox(key="shift_pattern").select("日勤のみ")
     at.session_state.staff_source = at.session_state.staff_source.iloc[:size].copy()
@@ -31,6 +32,10 @@ def small_app(size=3):
     at.run()
     assert not at.exception
     return at
+
+
+def breakdown(level, count=1):
+    return " / ".join(f"{name} {count if name == level else 0}" for name in ("最優先", "高め", "普通", "低め"))
 
 
 def inject(at, pairs=None, times=None):
@@ -83,10 +88,12 @@ def assert_no_results(at):
     assert not any("実労働時間" in f.value.columns for f in at.dataframe)
 
 
-@pytest.mark.parametrize("weight, expected", [(None, 1), ("", 1), (17, 17), (100, 100)])
-def test_unavoidable_pair_is_soft_and_exports_default_or_explicit_weight(weight, expected):
+@pytest.mark.parametrize("level, label, expected", [
+    (None, "普通", 5), ("", "普通", 5), ("高め", "高め", 20), ("最優先", "最優先", 100),
+])
+def test_unavoidable_pair_is_soft_and_exports_default_or_explicit_weight(level, label, expected):
     at = small_app(2)
-    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "重み": weight}])
+    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "優先度": level}])
     result, people, settings = assert_solution(generate(at), 2)
     assert all(person.is_leader for person in people)
     assert {a.employee_id for a in result.assignments} == {"S01", "S02"}
@@ -94,17 +101,17 @@ def test_unavoidable_pair_is_soft_and_exports_default_or_explicit_weight(weight,
     assert any("ソフト制約" in warning.value for warning in at.warning)
     metric = next(m for m in at.metric if m.label == "配慮ペアの同日・同シフト配置")
     assert metric.value == "1 回"
-    assert metric.delta == f"重み付き合計 {expected}"
+    assert metric.delta == breakdown(label)
     conflicts = table(at, "職員ID A", "職員ID B", "日付")
     assert conflicts.to_dict("records") == [
         {"職員ID A": "S01", "職員ID B": "S02", "日付": START.isoformat(),
-         "シフト": "日勤", "重み": expected},
+         "シフト": "日勤", "優先度": label},
     ]
 
 
 def test_avoidable_pair_with_three_staff_has_no_conflicts():
     at = small_app()
-    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "重み": 100}])
+    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "優先度": "最優先"}])
     result, _, _ = assert_solution(generate(at), 2)
     ids = {a.employee_id for a in result.assignments}
     assert "S03" in ids
@@ -116,9 +123,9 @@ def test_avoidable_pair_with_three_staff_has_no_conflicts():
 @pytest.mark.parametrize("kind", ["回避ペア", "個別勤務時刻"])
 def test_csv_import_restores_editor_types_and_preserves_other_inputs(kind):
     at = small_app()
-    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "重み": 2}],
+    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "優先度": "低め"}],
            times=[work_time("S03", **{"開始": "10:00", "終了": "15:00"})])
-    source = (pd.DataFrame([{"職員ID A": "S01", "職員ID B": "S03", "重み": 17}])
+    source = (pd.DataFrame([{"職員ID A": "S01", "職員ID B": "S03", "優先度": "高め"}])
               if kind == "回避ペア" else pd.DataFrame([work_time("S03", **{"開始": "11:00", "終了": "14:00"})]))
     content = source.to_csv(index=False).encode("utf-8-sig")
 
@@ -134,13 +141,12 @@ def test_csv_import_restores_editor_types_and_preserves_other_inputs(kind):
     assert not at.exception
     assert at.session_state.work_time_source["翌日終了"].dtype.kind == "b"
     assert at.session_state.work_time_source["休憩（分）"].dtype.kind in "iu"
-    assert at.session_state.pair_source["重み"].dtype.kind in "iu"
     if kind == "回避ペア":
-        assert at.session_state.pair_source.iloc[0]["重み"] == 17
+        assert at.session_state.pair_source.iloc[0]["優先度"] == "高め"
         assert at.session_state.work_time_source.iloc[0]["開始"] == "10:00"
     else:
         assert at.session_state.work_time_source.iloc[0]["開始"] == "11:00"
-        assert at.session_state.pair_source.iloc[0]["重み"] == 2
+        assert at.session_state.pair_source.iloc[0]["優先度"] == "低め"
     generate(at)
     assert at.session_state.schedule[1].has_solution
 
@@ -148,13 +154,13 @@ def test_csv_import_restores_editor_types_and_preserves_other_inputs(kind):
 def test_weights_choose_least_cost_pair_through_ui():
     at = small_app()
     inject(at, pairs=[
-        {"職員ID A": "S01", "職員ID B": "S02", "重み": 100},
-        {"職員ID A": "S01", "職員ID B": "S03", "重み": 2},
-        {"職員ID A": "S02", "職員ID B": "S03", "重み": 1},
+        {"職員ID A": "S01", "職員ID B": "S02", "優先度": "最優先"},
+        {"職員ID A": "S01", "職員ID B": "S03", "優先度": "普通"},
+        {"職員ID A": "S02", "職員ID B": "S03", "優先度": "低め"},
     ])
     result, _, _ = assert_solution(generate(at), 2)
     assert {a.employee_id for a in result.assignments} == {"S02", "S03"}
-    assert table(at, "職員ID A", "職員ID B", "日付")["重み"].tolist() == [1]
+    assert table(at, "職員ID A", "職員ID B", "日付")["優先度"].tolist() == ["低め"]
 
 
 @pytest.mark.parametrize("precedence", ["recurring", "dated_first", "dated_last"])
@@ -222,12 +228,12 @@ def test_override_alone_does_not_force_assignment():
 @pytest.mark.parametrize("source", ["pairs", "times"])
 def test_changed_personal_conditions_hide_all_previous_results(source):
     at = small_app()
-    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "重み": 1}],
+    inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "優先度": "低め"}],
            times=[work_time("S03")])
     assert_solution(generate(at), 2)
     saved_fingerprint = at.session_state.schedule[0]
     if source == "pairs":
-        inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "重み": 9}])
+        inject(at, pairs=[{"職員ID A": "S01", "職員ID B": "S02", "優先度": "高め"}])
     else:
         inject(at, times=[work_time("S03", **{"開始": "08:00"})])
     assert any("入力条件が変更" in warning.value for warning in at.warning)
@@ -244,7 +250,7 @@ def test_partial_leader_needs_segment_coverage_only_in_each_shift_mode(mode, exp
     staff["主任以上"] = [True, False, False]
     at.session_state.staff_source = staff
     at.session_state.editor_revision += 1
-    at.radio[0].set_value(mode)
+    at.radio(key="leader_mode_widget").set_value(mode)
     inject(at, times=[work_time("S01", **{"開始": "10:00", "終了": "14:00", "休憩（分）": 0})])
     generate(at)
     assert at.session_state.schedule[1].status == expected_status
@@ -266,14 +272,13 @@ def test_two_category_assignments_do_not_mean_full_temporal_coverage():
 
 
 @pytest.mark.parametrize("pairs, message", [
-    ([{"職員ID A": "UNKNOWN", "職員ID B": "S02", "重み": 1}], "未登録"),
-    ([{"職員ID A": "S01", "職員ID B": "S01", "重み": 1}], "同じ職員"),
-    ([{"職員ID A": "S01", "職員ID B": "S02", "重み": 1}] * 2, "重複"),
-    ([{"職員ID A": "S01", "職員ID B": "S02", "重み": 1},
-      {"職員ID A": "S02", "職員ID B": "S01", "重み": 2}], "逆順"),
-    ([{"職員ID A": "S01", "職員ID B": "S02", "重み": "1.5"}], "整数"),
-    ([{"職員ID A": "S01", "職員ID B": "S02", "重み": 0}], "1〜100"),
-    ([{"職員ID A": "S01", "職員ID B": "S02", "重み": 101}], "1〜100"),
+    ([{"職員ID A": "UNKNOWN", "職員ID B": "S02", "優先度": "低め"}], "未登録"),
+    ([{"職員ID A": "S01", "職員ID B": "S01", "優先度": "低め"}], "同じ職員"),
+    ([{"職員ID A": "S01", "職員ID B": "S02", "優先度": "低め"}] * 2, "重複"),
+    ([{"職員ID A": "S01", "職員ID B": "S02", "優先度": "低め"},
+      {"職員ID A": "S02", "職員ID B": "S01", "優先度": "普通"}], "逆順"),
+    ([{"職員ID A": "S01", "職員ID B": "S02", "優先度": "17"}], "低め・普通・高め・最優先"),
+    ([{"職員ID A": "S01", "職員ID B": "S02", "優先度": "最重要"}], "低め・普通・高め・最優先"),
 ])
 def test_invalid_pairs_are_rejected_by_generation(pairs, message):
     at = inject(small_app(), pairs=pairs)

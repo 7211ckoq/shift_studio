@@ -7,7 +7,7 @@ source = root / "src"
 datas = [(str(source / "app.py"), "."),
          (str(root / ".streamlit" / "config.toml"), ".streamlit")]
 binaries = []
-hiddenimports = ["optimizer", "pandas.io.formats.style", "jinja2", "altair"]
+hiddenimports = ["optimizer", "jp_holidays", "pandas.io.formats.style", "jinja2", "altair"]
 for package in ("streamlit", "ortools"):
     package_data, package_binaries, package_imports = collect_all(package)
     datas += package_data

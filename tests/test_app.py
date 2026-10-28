@@ -8,9 +8,11 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from app_helpers import all_workdays
+
 
 def app():
-    return AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45).run()
+    return all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45)).run()
 
 
 def click_generate(at):
@@ -65,7 +67,7 @@ def test_missing_leaders_shows_no_schedule():
 
 def test_requested_day_off_and_out_of_range_validation():
     at = app()
-    start = at.date_input[0].value
+    start = at.date_input[0].value[0]
     at.session_state.off_source = pd.DataFrame([{"職員ID": "S01", "日付": start.isoformat()}])
     at.session_state.editor_revision += 1
     at.run()
@@ -142,8 +144,7 @@ def test_custom_four_shifts_and_renaming():
 
 def test_fixed_employee_working_time_preset_and_cap_are_used():
     at = app()
-    at.date_input[0].set_value(date(2026, 1, 1)).run()
-    next(n for n in at.number_input if n.label == "作成日数").set_value(31).run()
+    at.date_input[0].set_value((date(2026, 1, 1), date(2026, 1, 1) + timedelta(days=31 - 1))).run()
     staff = at.session_state.staff_source.copy()
     staff.loc[0, "固定シフト"] = "深夜"
     staff.loc[0, "月間実労働時間プリセット"] = "80時間"
@@ -201,7 +202,7 @@ def test_renamed_or_removed_fixed_shift_is_not_silently_ignored():
 
 def test_multiple_requested_days_preserved_by_parser():
     at = app()
-    start = at.date_input[0].value
+    start = at.date_input[0].value[0]
     at.session_state.off_source = pd.DataFrame([
         {"職員ID": "S01", "日付": start.isoformat()},
         {"職員ID": "S01", "日付": (start + timedelta(days=1)).isoformat()},
@@ -219,8 +220,7 @@ def test_multiple_requested_days_preserved_by_parser():
 
 def test_custom_monthly_working_time_with_exact_matching():
     at = app()
-    at.date_input[0].set_value(date(2026, 1, 1)).run()
-    next(n for n in at.number_input if n.label == "作成日数").set_value(1).run()
+    at.date_input[0].set_value((date(2026, 1, 1), date(2026, 1, 1) + timedelta(days=1 - 1))).run()
     at.selectbox(key="shift_pattern").select("日勤のみ").run()
     staff = at.session_state.staff_source.copy()
     staff.loc[0, "月間実労働時間プリセット"] = "カスタム"
@@ -260,8 +260,7 @@ def test_zero_custom_working_time_prohibits_assignment():
 
 def test_nonmatching_working_time_is_infeasible_instead_of_approximated():
     at = app()
-    at.date_input[0].set_value(date(2026, 1, 1)).run()
-    next(n for n in at.number_input if n.label == "作成日数").set_value(1).run()
+    at.date_input[0].set_value((date(2026, 1, 1), date(2026, 1, 1) + timedelta(days=1 - 1))).run()
     at.selectbox(key="shift_pattern").select("日勤のみ").run()
     staff = at.session_state.staff_source.copy()
     staff.loc[0, "月間実労働時間プリセット"] = "カスタム"

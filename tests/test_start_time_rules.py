@@ -12,6 +12,8 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from app_helpers import all_workdays
+
 from optimizer import (
     Assignment, Employee, Settings, ShiftTime, WeeklyAssignment, WorkTimeOverride,
     audit_schedule, employee_shift_time, solve_schedule, validate_inputs,
@@ -249,10 +251,9 @@ def test_first_period_day_has_no_invented_previous_start_comparison(start):
 
 
 def small_app(size=3, pattern="日勤のみ"):
-    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=30).run()
+    at = all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=30)).run()
     assert not at.exception
-    at.date_input[0].set_value(MONDAY)
-    next(n for n in at.number_input if n.label == "作成日数").set_value(2)
+    at.date_input[0].set_value((MONDAY, MONDAY + timedelta(days=2 - 1)))
     next(n for n in at.number_input if n.label == "計算時間の上限（秒）").set_value(5)
     at.selectbox(key="shift_pattern").select(pattern)
     at.session_state.staff_source = at.session_state.staff_source.iloc[:size].copy()

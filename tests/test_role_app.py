@@ -1,6 +1,6 @@
 """名前付き役職のCSV互換・入力画面・結果表示を検証する。"""
 
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -8,6 +8,8 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
+
+from app_helpers import all_workdays
 
 from app import parse_employees, parse_role_requirements
 from optimizer import RoleRequirement
@@ -57,10 +59,9 @@ def test_role_columns_are_required_boolean_values_when_present():
 
 
 def test_role_requirements_generate_and_appear_in_results():
-    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45).run()
+    at = all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45)).run()
     assert not at.exception
-    at.date_input[0].set_value(START)
-    next(item for item in at.number_input if item.label == "作成日数").set_value(1)
+    at.date_input[0].set_value((START, START + timedelta(days=1 - 1)))
     next(item for item in at.number_input if item.label == "計算時間の上限（秒）").set_value(5)
     at.selectbox(key="shift_pattern").select("日勤のみ")
 
@@ -99,7 +100,7 @@ def test_role_requirements_generate_and_appear_in_results():
 
 
 def test_old_staff_csv_import_migrates_leader_flag_to_chief_membership():
-    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45).run()
+    at = all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45)).run()
     assert not at.exception
     old_csv = at.session_state.staff_source.drop(columns=["役職:主任"]).copy()
     content = old_csv.to_csv(index=False).encode("utf-8-sig")
@@ -118,7 +119,7 @@ def test_old_staff_csv_import_migrates_leader_flag_to_chief_membership():
 
 
 def test_invalid_role_definition_does_not_drop_existing_membership_columns():
-    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45).run()
+    at = all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=45)).run()
     assert not at.exception
     original = at.session_state.staff_source["役職:主任"].tolist()
     at.session_state.role_source = pd.DataFrame([

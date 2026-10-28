@@ -45,7 +45,8 @@ def test_exact_api_defaults_positional_compatibility_and_frozen_dataclasses():
     assert [f.name for f in fields(WorkTimeOverride)] == ["shift", "timing", "day"]
     assert [f.name for f in fields(AvoidPair)] == ["employee_id_a", "employee_id_b", "weight"]
     assert fields(Employee)[-1].name == "work_time_overrides"
-    assert fields(Settings)[-1].name == "avoid_pairs"
+    assert next(f for f in fields(Settings) if f.name == "avoid_pairs").kw_only is False
+    assert fields(Settings)[-1].name == "staffing_rules"
     assert Employee("x", "名前", True, frozenset(), None, None, None).work_time_overrides == ()
     assert Settings(START).avoid_pairs == ()
     assert WorkTimeOverride(SHIFT, BASE).day is None

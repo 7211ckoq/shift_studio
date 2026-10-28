@@ -61,7 +61,7 @@ def test_consecutive_work_infeasible_without_daily_shortage():
 
 
 @pytest.mark.parametrize("changes", [
-    {"minimum_staff": 1}, {"minimum_staff": 2.5}, {"days": 0},
+    {"minimum_staff": 0}, {"minimum_staff": 2.5}, {"days": 0},
     {"days": 63}, {"leader_mode": "invalid"}, {"max_consecutive_days": 0},
     {"minimum_rest_hours": -1}, {"time_limit_seconds": 0},
 ])

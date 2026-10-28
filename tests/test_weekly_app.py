@@ -1,7 +1,7 @@
 """曜日固定・複数シフト回避を、画面操作・CSV取込から生成まで検証する。"""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
@@ -11,12 +11,14 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
+from app_helpers import all_workdays
+
 from optimizer import WeeklyAssignment, audit_schedule
 
 
 START = date(2026, 1, 26)  # 月曜。8日間なら月・週の境界と翌月の月曜を含む。
 WEEKLY_COLUMNS = ["職員ID", "曜日", "シフト"]
-PREFERENCE_COLUMNS = ["職員ID", "回避シフト", "重み"]
+PREFERENCE_COLUMNS = ["職員ID", "回避シフト", "優先度"]
 DOWNLOADS = {
     "シフト表 CSV", "日別配置 CSV", "職員別集計 CSV", "月別労働時間 CSV",
     "個別勤務明細 CSV", "ペア配慮結果 CSV", "曜日固定結果 CSV",
@@ -26,10 +28,9 @@ DOWNLOADS = {
 
 def small_app(size=3, days=1, pattern="日勤のみ"):
     # appをimportすると収集時に画面コードが動くため、必ずAppTestで実行する。
-    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=30).run()
+    at = all_workdays(AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src" / "app.py"), default_timeout=30)).run()
     assert not at.exception
-    at.date_input[0].set_value(START)
-    next(n for n in at.number_input if n.label == "作成日数").set_value(days)
+    at.date_input[0].set_value((START, START + timedelta(days=days - 1)))
     next(n for n in at.number_input if n.label == "計算時間の上限（秒）").set_value(5)
     at.selectbox(key="shift_pattern").select(pattern)
     at.session_state.staff_source = at.session_state.staff_source.iloc[:size].copy()
@@ -55,8 +56,8 @@ def fixed(pid="S01", weekday="月", shift="日勤"):
     return {"職員ID": pid, "曜日": weekday, "シフト": shift}
 
 
-def preference(pid="S01", shifts=("日勤",), weight=1):
-    return {"職員ID": pid, "回避シフト": json.dumps(list(shifts), ensure_ascii=False), "重み": weight}
+def preference(pid="S01", shifts=("日勤",), priority="普通"):
+    return {"職員ID": pid, "回避シフト": json.dumps(list(shifts), ensure_ascii=False), "優先度": priority}
 
 
 def generate(at):
@@ -170,17 +171,17 @@ def test_invalid_weekly_source_rejected_on_generation(rows, message):
 
 @pytest.mark.parametrize("size, count", [(3, 0), (2, 1)])
 def test_avoidable_and_unavoidable_shift_is_soft(size, count):
-    at = inject(small_app(size=size), preferences=[preference(weight=17)])
+    at = inject(small_app(size=size), preferences=[preference(priority="高め")])
     result, people, _ = solution(generate(at), 2)
     person = next(p for p in people if p.employee_id == "S01")
     assert person.avoided_shifts == frozenset({"日勤"})
-    assert person.shift_avoidance_weight == 17
+    assert person.shift_avoidance_weight == 20
     assert sum(a.employee_id == "S01" for a in result.assignments) == count
     assert next(m for m in at.metric if m.label == "回避希望シフトへの配置").value == f"{count} 回"
     rows = table(at, "回避シフト", "日付")
     assert len(rows) == count
     if count:
-        assert rows.to_dict("records") == [{"職員ID": "S01", "日付": START.isoformat(), "回避シフト": "日勤", "重み": 17}]
+        assert rows.to_dict("records") == [{"職員ID": "S01", "日付": START.isoformat(), "回避シフト": "日勤", "優先度": "高め"}]
         assert any("回避希望シフトへの配置が残って" in w.value for w in at.warning)
 
 
@@ -189,7 +190,7 @@ def test_actual_multiselect_multiple_choices_change_and_hard_fixed_wins_with_csv
     rev = at.session_state.weekly_revision
     widget = at.multiselect(key=f"avoid_shifts_{rev}_S01")
     widget.select("深夜").select("準夜")
-    at.number_input(key=f"avoid_weight_{rev}_S01").set_value(100)
+    at.radio(key=f"avoid_priority_{rev}_S01").set_value("最優先")
     at.run()
     assert not at.exception
     assert at.multiselect(key=f"avoid_shifts_{rev}_S01").value == ["深夜", "準夜"]
@@ -226,14 +227,14 @@ def test_actual_multiselect_multiple_choices_change_and_hard_fixed_wins_with_csv
     assert table(at, "回避シフト", "日付").empty
 
 
-@pytest.mark.parametrize("pair_weight, shift_weight, chosen", [(3, 2, "S03"), (3, 4, "S02")])
+@pytest.mark.parametrize("pair_weight, shift_weight, chosen", [("高め", "普通", "S03"), ("普通", "高め", "S02")])
 def test_pair_and_shift_costs_combine_before_fairness(pair_weight, shift_weight, chosen):
     at = small_app()
     at.session_state.pair_source = pd.DataFrame([
-        {"職員ID A": "S01", "職員ID B": "S02", "重み": pair_weight}
+        {"職員ID A": "S01", "職員ID B": "S02", "優先度": pair_weight}
     ])
     at.session_state.condition_revision += 1
-    inject(at, weekly=[fixed()], preferences=[preference("S03", weight=shift_weight)])
+    inject(at, weekly=[fixed()], preferences=[preference("S03", priority=shift_weight)])
     result, _, _ = solution(generate(at), 2)
     assert {a.employee_id for a in result.assignments} == {"S01", chosen}
     assert len(table(at, "職員ID A", "日付")) == (chosen == "S02")
@@ -250,7 +251,7 @@ def test_input_updates_hide_all_previous_results_and_downloads(change):
     elif change == "preferences":
         inject(at, preferences=[preference("S02")])
     else:
-        at.number_input(key=f"avoid_weight_{at.session_state.weekly_revision}_S01").set_value(9).run()
+        at.radio(key=f"avoid_priority_{at.session_state.weekly_revision}_S01").set_value("最優先").run()
     assert not at.exception
     assert any("入力条件が変更" in w.value for w in at.warning)
     no_results(at)
@@ -260,8 +261,8 @@ def test_input_updates_hide_all_previous_results_and_downloads(change):
 
 @pytest.mark.parametrize("kind", ["曜日固定", "シフト回避"])
 def test_csv_import_buttons_preserve_other_sources_and_rebuild_widgets(kind):
-    at = inject(small_app(), weekly=[fixed()], preferences=[preference("S02", weight=2)])
-    at.session_state.pair_source = pd.DataFrame([{"職員ID A": "S01", "職員ID B": "S03", "重み": 3}])
+    at = inject(small_app(), weekly=[fixed()], preferences=[preference("S02", priority="低め")])
+    at.session_state.pair_source = pd.DataFrame([{"職員ID A": "S01", "職員ID B": "S03", "優先度": "普通"}])
     at.session_state.work_time_source = pd.DataFrame([
         {"職員ID": "S01", "日付": "", "シフト": "日勤", "開始": "08:00", "終了": "18:00", "翌日終了": False, "休憩（分）": 60}
     ])
@@ -272,7 +273,7 @@ def test_csv_import_buttons_preserve_other_sources_and_rebuild_widgets(kind):
         "staff_source", "off_source", "pair_source", "work_time_source", "weekly_source", "preference_source")}
     revision = at.session_state.weekly_revision
     source = (pd.DataFrame([fixed("S03")], columns=WEEKLY_COLUMNS) if kind == "曜日固定" else
-              pd.DataFrame([preference("S02", weight=17)], columns=PREFERENCE_COLUMNS))
+              pd.DataFrame([preference("S02", priority="高め")], columns=PREFERENCE_COLUMNS))
     import_csv(at, kind, source)
     assert at.session_state.weekly_revision == revision + 1
     for name, old in before.items():
@@ -284,8 +285,7 @@ def test_csv_import_buttons_preserve_other_sources_and_rebuild_widgets(kind):
     no_results(at)
     rev = at.session_state.weekly_revision
     assert at.multiselect(key=f"avoid_shifts_{rev}_S02").value == ["日勤"]
-    assert at.number_input(key=f"avoid_weight_{rev}_S02").value == (2 if kind == "曜日固定" else 17)
-    assert at.session_state.preference_source["重み"].dtype.kind in "iu"
+    assert at.radio(key=f"avoid_priority_{rev}_S02").value == ("低め" if kind == "曜日固定" else "高め")
     _, people, _ = solution(generate(at), 2)
     assert next(p for p in people if p.employee_id == ("S03" if kind == "曜日固定" else "S01")).weekly_assignments == (WeeklyAssignment(0, "日勤"),)
 
@@ -300,9 +300,12 @@ def test_csv_import_buttons_preserve_other_sources_and_rebuild_widgets(kind):
     ("シフト回避", pd.DataFrame([preference("UNKNOWN")]), "未登録"),
     ("シフト回避", pd.DataFrame([preference(), preference()]), "重複"),
     ("シフト回避", pd.DataFrame([preference(shifts=("未知",))]), "シフト"),
-    *[("シフト回避", pd.DataFrame([{"職員ID": "S01", "回避シフト": raw, "重み": 1}]), "JSON配列")
+    *[("シフト回避", pd.DataFrame([{"職員ID": "S01", "回避シフト": raw, "優先度": "普通"}]), "JSON配列")
     for raw in ('[', '"日勤"', '{}', 'false', '[1]', '["日勤", "日勤"]')],
-    *[("シフト回避", pd.DataFrame([preference(weight=weight)]), "1〜100")
+    *[("シフト回避", pd.DataFrame([preference(priority=level)]), "低め・普通・高め・最優先")
+    for level in ("0", "100", "最重要")],
+    # 旧形式の「重み」列は範囲内なら優先度に変換し、範囲外は拒否する。
+    *[("シフト回避", pd.DataFrame([{"職員ID": "S01", "回避シフト": '["日勤"]', "重み": weight}]), "1〜100")
     for weight in (0, 101, "1.5", "Infinity")],
 ])
 def test_invalid_csv_import_is_atomic_and_shows_validation_error(kind, frame, message):
